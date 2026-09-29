@@ -1,0 +1,16 @@
+[project]
+name = "kflow"
+version = "0.1.0"
+description = "Submit, track and study agents in Kaggle simulation competitions"
+requires-python = ">=3.11"
+dependencies = ["kaggle>=2.0", "kaggle-environments"]
+
+[project.scripts]
+kflow = "kflow:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["kflow"]
