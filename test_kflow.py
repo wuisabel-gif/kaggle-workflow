@@ -66,5 +66,42 @@ class GameTests(unittest.TestCase):
         self.assertEqual(sorted(g["seat"] for g in games), [0, 1])
 
 
+TUNABLE = """
+PREFERRED = 0
+OTHER = {"a": 1}
+
+
+def agent(obs, config):
+    order = [PREFERRED] + [c for c in range(config.columns) if c != PREFERRED]
+    return next(c for c in order if obs.board[c] == 0)
+"""
+
+
+class TuneTests(unittest.TestCase):
+    def test_constants_round_trip(self):
+        rewritten = kflow.write_constants(TUNABLE, {"PREFERRED": 3})
+        self.assertEqual(kflow.read_constants(rewritten, ["PREFERRED"]), {"PREFERRED": 3})
+        self.assertIn('OTHER = {"a": 1}', rewritten)
+        with self.assertRaises(ValueError):
+            kflow.read_constants(TUNABLE, ["MISSING"])
+
+    def test_tune_writes_valid_best_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (root / "kflow.toml").write_text('competition = "connectx"\n')
+            (root / "agent.py").write_text(TUNABLE)
+            (root / "tune.toml").write_text(
+                'agent = "agent.py"\nopponents = ["random"]\nseeds = "1-2"\n'
+                'val_seeds = "3"\niterations = 2\npopulation = 3\n'
+                '[params.PREFERRED]\nlow = 0\nhigh = 6\ntype = "int"\n')
+            config = kflow.load_config(root)
+            summary = kflow.tune(kflow.load_tune_spec(root / "tune.toml", config), config)
+            best = Path(summary["best_file"])
+            self.assertIn(summary["params"]["PREFERRED"], range(7))
+            self.assertEqual(kflow.preflight(best, "connectx", 10), [])
+            log = (best.parent / "log.jsonl").read_text().splitlines()
+            self.assertEqual(len(log), 6)
+
+
 if __name__ == "__main__":
     unittest.main()

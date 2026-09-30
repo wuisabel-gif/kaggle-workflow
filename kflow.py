@@ -7,7 +7,7 @@ Run from a project directory that contains kflow.toml:
     team = "agentic warriors"       # our leaderboard team name
     data_dir = ".kflow"             # ledger, ratings history, replay cache
 
-Commands: status, leaderboard, pull, preflight, gate, submit.
+Commands: status, leaderboard, pull, preflight, gate, submit, tune, auto.
 See README.md for examples.
 """
 from __future__ import annotations
@@ -322,26 +322,232 @@ def cmd_gate(args, config):
         sys.exit("an agent ended with a bad status")
 
 
-def cmd_submit(args, config):
-    file = Path(args.file).resolve()
-    record = {"file": str(file.relative_to(config["root"])) if file.is_relative_to(config["root"]) else str(file),
-              "sha256": sha256(file), "message": args.message, **git_state(file)}
+def submit_file(file: Path, message: str, config: dict, steps: int, upload: bool) -> dict:
+    """Describe the upload; when `upload`, preflight, submit and ledger it."""
+    file = file.resolve()
+    root = config["root"]
+    record = {"file": str(file.relative_to(root)) if file.is_relative_to(root) else str(file),
+              "sha256": sha256(file), "message": message, **git_state(file)}
     print(json.dumps(record, indent=1))
     if record.get("git_dirty"):
         print("warning: file has uncommitted changes")
-    if not args.yes:
-        sys.exit("dry run: nothing uploaded. Re-run with --yes to submit.")
-    problems = preflight(file, config["env"], args.steps)
+    if not upload:
+        print("dry run: nothing uploaded.")
+        return record
+    problems = preflight(file, config["env"], steps)
     if problems:
         sys.exit("preflight failed: " + "; ".join(problems))
     api = kaggle_api()
     before = {s["ref"] for s in all_submissions(api, config["competition"])}
-    api.competition_submit(str(file), args.message, config["competition"], quiet=True)
+    api.competition_submit(str(file), message, config["competition"], quiet=True)
     new = [s for s in all_submissions(api, config["competition"]) if s["ref"] not in before]
     record.update(submitted_utc=now_utc(), ref=new[0]["ref"] if new else None,
                   competition=config["competition"])
     append_jsonl(config["data_dir"] / "ledger.jsonl", record)
     print(f"submitted as {record['ref']}; recorded in {config['data_dir'] / 'ledger.jsonl'}")
+    return record
+
+
+def cmd_submit(args, config):
+    submit_file(Path(args.file), args.message, config, args.steps, upload=args.yes)
+    if not args.yes:
+        sys.exit("Re-run with --yes to submit.")
+
+
+# Policy search (cross-entropy method) over an agent's top-level constants
+
+
+def read_constants(source: str, names) -> dict:
+    """Current literal values of top-level `NAME = <literal>` assignments."""
+    import ast
+
+    values = {}
+    for node in ast.parse(source).body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name) and node.targets[0].id in names):
+            values[node.targets[0].id] = ast.literal_eval(node.value)
+    missing = set(names) - set(values)
+    if missing:
+        raise ValueError(f"no top-level literal assignment for: {sorted(missing)}")
+    return values
+
+
+def write_constants(source: str, values: dict) -> str:
+    """Return source with each top-level `NAME = ...` replaced by NAME = value.
+
+    The result is a standalone file, so a tuned candidate can be submitted as is.
+    """
+    import ast
+
+    lines = source.splitlines(keepends=True)
+    nodes = [
+        node for node in ast.parse(source).body
+        if isinstance(node, ast.Assign) and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name) and node.targets[0].id in values
+    ]
+    for node in sorted(nodes, key=lambda n: n.lineno, reverse=True):
+        name = node.targets[0].id
+        lines[node.lineno - 1:node.end_lineno] = [f"{name} = {values[name]!r}\n"]
+    return "".join(lines)
+
+
+def load_tune_spec(path: Path, config: dict) -> dict:
+    spec = tomllib.loads(path.read_text())
+    root = config["root"]
+    spec["agent"] = resolve_agent(spec["agent"], root)
+    spec["baseline"] = resolve_agent(spec.get("baseline", spec["agent"]), root)
+    spec["opponents"] = [resolve_agent(o, root) for o in spec["opponents"]]
+    spec.setdefault("seeds", "1-12")  # few seeds overfit: +7k train became -16k held-out
+    spec.setdefault("val_seeds", "101-108")
+    spec.setdefault("iterations", 6)
+    spec.setdefault("population", 8)
+    spec.setdefault("rng_seed", 0)
+    spec.setdefault("steps", None)
+    spec.setdefault("min_gain", 0.01)
+    return spec
+
+
+def sample(rng, mean, std, bounds):
+    low, high, kind = bounds
+    value = min(high, max(low, rng.gauss(mean, std)))
+    return int(round(value)) if kind == "int" else round(value, 4)
+
+
+def paired_scores(env_name, files, spec, seeds, base=None):
+    """Mean reward difference of each file vs the baseline on identical games.
+
+    Pass the returned `base` games back in to avoid replaying the baseline.
+    """
+    everyone = ([] if base else [spec["baseline"]]) + list(files)
+    jobs = [(env_name, agent, o, s, seat, spec["steps"])
+            for agent in everyone for o in spec["opponents"] for s in seeds for seat in (0, 1)]
+    with ProcessPoolExecutor() as pool:
+        games = list(pool.map(play, jobs))
+    if not base:
+        base, games = games[:len(games) // len(everyone)], games[len(games) // len(everyone):]
+    per = len(base)
+    results = []
+    for index in range(len(files)):
+        mine = games[index * per:(index + 1) * per]
+        deltas = [(g["reward"] or 0) - (b["reward"] or 0) for g, b in zip(mine, base)]
+        results.append({
+            "delta": sum(deltas) / len(deltas),
+            "better": sum(d > 0 for d in deltas),
+            "worse": sum(d < 0 for d in deltas),
+            "bad": any(g["status"] in BAD_STATUSES for g in mine),
+        })
+    base_mean = sum((b["reward"] or 0) for b in base) / len(base)
+    return results, base_mean, base
+
+
+def tune(spec: dict, config: dict) -> dict:
+    """Cross-entropy method: sample settings, keep the elite, refit, repeat."""
+    import random
+    import statistics
+
+    rng = random.Random(spec["rng_seed"])
+    source = Path(spec["agent"]).read_text()
+    bounds = {n: (float(p["low"]), float(p["high"]), p.get("type", "float"))
+              for n, p in spec["params"].items()}
+    start = read_constants(source, bounds)
+    mean = {n: float(start[n]) for n in bounds}
+    std = {n: (b[1] - b[0]) / 4 for n, b in bounds.items()}
+    run = config["data_dir"] / "tune" / dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    run.mkdir(parents=True)
+    seeds = parse_seeds(str(spec["seeds"]))
+    elite_count = max(2, spec["population"] // 4)
+    best = {"delta": float("-inf")}
+    base = None
+    for iteration in range(spec["iterations"]):
+        # Candidate 0 is the current mean, so the search never forgets its centre.
+        population = [{n: sample(rng, mean[n], 0.0 if i == 0 else std[n], bounds[n])
+                       for n in bounds} for i in range(spec["population"])]
+        files = []
+        for i, values in enumerate(population):
+            path = run / f"cand_{iteration:02d}_{i:02d}.py"
+            path.write_text(write_constants(source, values))
+            files.append(str(path))
+        scores, base_mean, base = paired_scores(config["env"], files, spec, seeds, base)
+        ranked = []
+        for values, path, result in zip(population, files, scores):
+            row = {"iteration": iteration, "file": path, "params": values, **result}
+            append_jsonl(run / "log.jsonl", row)
+            if not result["bad"]:
+                ranked.append(row)
+        ranked.sort(key=lambda r: r["delta"], reverse=True)
+        elite = ranked[:elite_count]
+        if ranked and ranked[0]["delta"] > best["delta"]:
+            best = ranked[0]
+        for n, (low, high, _) in bounds.items():
+            picks = [float(r["params"][n]) for r in elite] or [mean[n]]
+            mean[n] = statistics.fmean(picks)
+            floor = (high - low) * 0.05  # keep exploring a little
+            std[n] = max(floor, statistics.pstdev(picks)) if len(picks) > 1 else floor
+        print(f"iteration {iteration}: best delta {ranked[0]['delta']:+.1f} "
+              f"(baseline mean {base_mean:.1f}); running best {best['delta']:+.1f}"
+              if ranked else f"iteration {iteration}: every candidate failed")
+    if best["delta"] == float("-inf"):
+        sys.exit("tuning found no candidate that finished cleanly")
+    # Held-out seeds guard against settings that only fit the training towns.
+    (validation,), base_mean, _ = paired_scores(
+        config["env"], [best["file"]], spec, parse_seeds(str(spec["val_seeds"])))
+    best_path = run / "best.py"
+    best_path.write_text(Path(best["file"]).read_text())
+    summary = {"run": str(run), "best_file": str(best_path), "params": best["params"],
+               "start": start, "train_delta": best["delta"], "validation": validation,
+               "baseline_mean": base_mean,
+               "passed": (not validation["bad"] and validation["better"] > validation["worse"]
+                          and validation["delta"] > spec["min_gain"] * abs(base_mean))}
+    (run / "summary.json").write_text(json.dumps(summary, indent=1))
+    print(f"validation: delta {validation['delta']:+.1f} over baseline mean {base_mean:.1f}, "
+          f"better {validation['better']}, worse {validation['worse']} -> "
+          f"{'PASSED' if summary['passed'] else 'not better'}")
+    print(f"best settings {best['params']} written to {best_path}")
+    return summary
+
+
+def cmd_tune(args, config):
+    tune(load_tune_spec(Path(args.spec), config), config)
+
+
+def cmd_auto(args, config):
+    """One unattended cycle: record scores, rank, tune, validate, report, maybe submit."""
+    report = [f"# kflow auto {now_utc()}", ""]
+    api = kaggle_api()
+    subs = all_submissions(api, config["competition"])
+    append_csv(config["data_dir"] / "ratings.csv",
+               [{"snapshot_utc": now_utc(), "ref": s["ref"], "status": s["status"],
+                 "score": s.get("publicScore") or ""} for s in subs],
+               ["snapshot_utc", "ref", "status", "score"])
+    scored = sorted((s for s in subs if score(s.get("publicScore")) is not None),
+                    key=lambda s: score(s["publicScore"]), reverse=True)
+    report += ["## Submissions", ""] + [
+        f"- {s['ref']} {s['publicScore']} {s['fileName']}: {str(s.get('description') or '')[:60]}"
+        for s in scored[:5]]
+    rows = read_leaderboard(api, config)
+    ours = [r for r in rows if r.get("TeamName", "").lower() == config["team"].lower()]
+    if ours:
+        report += ["", f"Rank {ours[0]['Rank']} of {len(rows)}, score {ours[0]['Score']}."]
+    if args.tune:
+        spec = load_tune_spec(Path(args.tune), config)
+        result = tune(spec, config)
+        v = result["validation"]
+        report += ["", "## Tuning", "",
+                   f"- Settings: {result['params']} (started from {result['start']})",
+                   f"- Held-out games vs baseline: mean {v['delta']:+.1f} on a baseline mean "
+                   f"of {result['baseline_mean']:.1f}; better {v['better']}, worse {v['worse']}",
+                   f"- Verdict: {'passed' if result['passed'] else 'not better; nothing submitted'}",
+                   f"- Candidate: `{result['best_file']}`"]
+        if result["passed"]:
+            message = f"kflow auto: {result['params']} (+{v['delta']:.0f} held-out)"
+            record = submit_file(Path(result["best_file"]), message[:200], config, 50,
+                                 upload=args.submit)
+            report.append(f"- Submission: {record.get('ref', 'dry run (pass --submit to upload)')}")
+    path = config["data_dir"] / "auto" / f"{dt.datetime.now():%Y%m%d-%H%M%S}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(report) + "\n")
+    print("\n".join(report))
+    print(f"\nreport: {path}")
 
 
 def main(argv=None):
@@ -382,6 +588,16 @@ def main(argv=None):
     p.add_argument("--yes", action="store_true", help="actually upload (default is a dry run)")
     p.add_argument("--steps", type=int, default=50, help="preflight episode length")
     p.set_defaults(func=cmd_submit)
+
+    p = sub.add_parser("tune", help="policy search over an agent's constants")
+    p.add_argument("spec", help="tune.toml describing agent, opponents and parameter ranges")
+    p.set_defaults(func=cmd_tune)
+
+    p = sub.add_parser("auto", help="record, rank, tune, validate and report in one cycle")
+    p.add_argument("--tune", help="tune.toml; omit to only record scores and rank")
+    p.add_argument("--submit", action="store_true",
+                   help="upload the tuned agent if it passes held-out validation")
+    p.set_defaults(func=cmd_auto)
 
     args = parser.parse_args(argv)
     args.func(args, load_config())

@@ -2,7 +2,8 @@
 
 One command for the Kaggle side of a simulation competition: check scores,
 read the leaderboard, download replays, check an agent before upload, compare
-agents locally, and submit with a record of exactly what was uploaded.
+agents locally, tune an agent's settings by self-play, and submit with a record
+of exactly what was uploaded.
 
 Game strategy stays in your competition repo. kflow only handles the Kaggle
 workflow around it, and works for any `kaggle_environments` competition.
@@ -59,6 +60,59 @@ the live ladder; treat them as a check for regressions, not a forecast of rank.
 
 `submit` never uploads without `--yes`, refuses if preflight fails, and warns
 when the file has uncommitted changes.
+
+## Learning agent settings automatically
+
+`kflow tune` is a policy search, a simple form of reinforcement learning. It
+treats top-level constants in your agent (`TARGET_HERD = 15`) as knobs, plays
+local games with many sampled settings, keeps the best quarter, re-centres on
+them, and repeats (the cross-entropy method). Every candidate is scored by its
+reward minus the unchanged agent's reward on the same seeds and seats.
+
+```toml
+# tune.toml
+agent = "main_adaptive.py"        # file whose constants are tuned
+baseline = "main_adaptive.py"     # compared against (defaults to agent)
+opponents = ["main.py", "starter"]
+seeds = "1-12"                    # training games
+val_seeds = "101-108"             # held-out games, never used for training
+iterations = 6
+population = 8
+min_gain = 0.01                   # held-out gain must beat 1% of baseline reward
+
+[params.TARGET_HERD]
+low = 12
+high = 20
+type = "int"
+
+[params.JOBS_PER_HAND]
+low = 5.0
+high = 9.0
+```
+
+```bash
+kflow tune tune.toml
+```
+
+The winner is re-played on `val_seeds` and only counts as better if it gains on
+games it never trained on. In a first Kaggriculture run with 4 training seeds,
+the best settings gained 7,099 in training and lost 15,769 held-out, which is
+why the default is now 12 training seeds. Each run writes every candidate,
+`log.jsonl`, `best.py` (a standalone, submittable file) and `summary.json` to
+`.kflow/tune/<time>/`. Only literal top-level assignments can be tuned.
+
+## Automatic cycle
+
+```bash
+kflow auto                          # record scores and rank, write a report
+kflow auto --tune tune.toml         # ...plus tune and validate
+kflow auto --tune tune.toml --submit
+```
+
+`auto` records every submission's score, finds our rank, optionally tunes, and
+writes a report to `.kflow/auto/<time>.md`. With `--submit` it uploads the
+tuned agent, through the same preflight and ledger as `kflow submit`, but only
+if it passed held-out validation. Without `--submit` it never uploads.
 
 ## Scheduled tracking
 
