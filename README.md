@@ -118,8 +118,9 @@ if it passed held-out validation. Without `--submit` it never uploads.
 
 [`examples/track.yml`](examples/track.yml) is a GitHub Actions workflow for the
 competition repo. It records scores daily and commits `ratings.csv`, so the
-rating history builds up without anyone remembering to run it. It needs a
-`KAGGLE_API_TOKEN` repository secret.
+rating history builds up without anyone remembering to run it. It needs two
+repository secrets: `KAGGLE_API_TOKEN`, and `KFLOW_REPO_TOKEN`, a read-only
+token for this private repo so the workflow can install kflow.
 
 ## Tests
 

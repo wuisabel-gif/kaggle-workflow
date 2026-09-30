@@ -136,7 +136,8 @@ def cmd_status(args, config):
     scored = [s for s in subs if score(s.get("publicScore")) is not None]
     if scored:
         best = max(scored, key=lambda s: score(s["publicScore"]))
-        print(f"\n{len(subs)} submissions; best {best['ref']} at {best['publicScore']}")
+        print(f"\n{len(subs)} submissions; highest score ever recorded: "
+              f"{best['ref']} at {best['publicScore']} (old submissions may no longer play)")
     if args.record:
         stamp = now_utc()
         rows = [
@@ -519,11 +520,11 @@ def cmd_auto(args, config):
                [{"snapshot_utc": now_utc(), "ref": s["ref"], "status": s["status"],
                  "score": s.get("publicScore") or ""} for s in subs],
                ["snapshot_utc", "ref", "status", "score"])
-    scored = sorted((s for s in subs if score(s.get("publicScore")) is not None),
-                    key=lambda s: score(s["publicScore"]), reverse=True)
-    report += ["## Submissions", ""] + [
-        f"- {s['ref']} {s['publicScore']} {s['fileName']}: {str(s.get('description') or '')[:60]}"
-        for s in scored[:5]]
+    # Newest first: old submissions keep frozen scores but no longer play.
+    report += ["## Newest submissions", ""] + [
+        f"- {s['ref']} {s.get('publicScore') or s['status']} {s['fileName']}: "
+        f"{str(s.get('description') or '')[:60]}"
+        for s in subs[:5]]
     rows = read_leaderboard(api, config)
     ours = [r for r in rows if r.get("TeamName", "").lower() == config["team"].lower()]
     if ours:

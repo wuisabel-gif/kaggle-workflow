@@ -1,6 +1,7 @@
 # Copy to .github/workflows/track.yml in the competition repo (next to kflow.toml).
 # Records every submission's score once a day and commits ratings.csv.
-# Needs repository secret KAGGLE_API_TOKEN; kflow must be installable from git.
+# Needs repository secrets KAGGLE_API_TOKEN and KFLOW_REPO_TOKEN (a read-only token
+# for the private kaggle-workflow repo).
 name: track
 
 on:
@@ -19,7 +20,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install "kflow @ git+https://github.com/OWNER/kaggle-workflow"
+      - run: pip install "kflow @ git+https://x-access-token:${{ secrets.KFLOW_REPO_TOKEN }}@github.com/wuisabel-gif/kaggle-workflow"
       - run: kflow status --record
         env:
           KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
