@@ -30,7 +30,7 @@ jobs:
 
 That run records every submission, writes rank into the job summary, and (when `commit: true`) pushes `.kflow/ratings.csv`. The Action never uploads an agent.
 
-Pin a release tag (`@v1` or `@v0.2.0`) once you have published one. Until then, `@main` works on the public repo.
+Pin `@v1` for the latest 0.x release, or an exact tag such as `@v0.2.0`.
 
 ### Inputs
 
@@ -161,18 +161,6 @@ python3 -m unittest -v
 ```
 
 The tests run offline against `connectx` and take a few seconds.
-
-## Release and Marketplace
-
-After this repo is on `main`:
-
-1. Tag `v0.2.0` and create a GitHub Release.
-2. On the release form, check **Publish this Action to the GitHub Marketplace**.
-3. Accept the GitHub Marketplace Developer Agreement (account 2FA required).
-4. Primary category: Continuous integration. Secondary: Utilities.
-5. Optional: set repository secret `PYPI_API_TOKEN` so the release workflow can `twine upload`.
-
-Until that release exists, competition repos can still `uses: wuisabel-gif/kaggle-workflow@main`.
 
 ## License
 
