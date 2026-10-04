@@ -1,7 +1,6 @@
-# Copy to .github/workflows/track.yml in the competition repo (next to kflow.toml).
-# Records every submission's score once a day and commits ratings.csv.
-# Needs repository secrets KAGGLE_API_TOKEN and KFLOW_REPO_TOKEN (a read-only token
-# for the private kaggle-workflow repo).
+# Daily score snapshot in the competition repo (next to kflow.toml).
+# Repository secret: KAGGLE_API_TOKEN
+# Pin wuisabel-gif/kaggle-workflow@v1 after the first GitHub release.
 name: track
 
 on:
@@ -17,17 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: wuisabel-gif/kaggle-workflow@v1
         with:
-          python-version: "3.12"
-      - run: pip install "kflow @ git+https://x-access-token:${{ secrets.KFLOW_REPO_TOKEN }}@github.com/wuisabel-gif/kaggle-workflow"
-      - run: kflow status --record
-        env:
-          KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
-      - name: Commit ratings
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .kflow/ratings.csv
-          git diff --cached --quiet || git commit -m "Record submission scores $(date -u +%F)"
-          git push
+          kaggle-api-token: ${{ secrets.KAGGLE_API_TOKEN }}
+          commit: true

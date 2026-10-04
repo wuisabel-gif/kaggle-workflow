@@ -1,10 +1,14 @@
 """Offline checks; run: python3 -m unittest -v"""
+import importlib.util
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
 import kflow
+
+ROOT = Path(__file__).resolve().parent
 
 AGENT = """
 def helper(obs):
@@ -101,6 +105,68 @@ class TuneTests(unittest.TestCase):
             self.assertEqual(kflow.preflight(best, "connectx", 10), [])
             log = (best.parent / "log.jsonl").read_text().splitlines()
             self.assertEqual(len(log), 6)
+
+
+class PublishTests(unittest.TestCase):
+    def test_writes_last_json_and_github_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = {"data_dir": Path(tmp) / "data"}
+            out = Path(tmp) / "out"
+            summary = Path(tmp) / "summary"
+            os.environ["GITHUB_OUTPUT"] = str(out)
+            os.environ["GITHUB_STEP_SUMMARY"] = str(summary)
+            try:
+                kflow.publish_result(
+                    config,
+                    {"command": "status", "rank": 4, "passed": True, "nested": {"x": 1}},
+                    "## hello\n",
+                )
+            finally:
+                os.environ.pop("GITHUB_OUTPUT", None)
+                os.environ.pop("GITHUB_STEP_SUMMARY", None)
+            last = json.loads((config["data_dir"] / "last.json").read_text())
+            self.assertEqual(last["rank"], 4)
+            text = out.read_text()
+            self.assertIn("rank=4", text)
+            self.assertIn("passed=true", text)
+            self.assertNotIn("nested=", text)
+            self.assertIn("## hello", summary.read_text())
+
+
+class ActionTests(unittest.TestCase):
+    def test_action_metadata(self):
+        text = (ROOT / "action.yml").read_text()
+        self.assertIn("name: kaggle-kflow", text)
+        self.assertIn("scripts/run_action.py", text)
+        self.assertNotIn("--submit", text)
+
+    def test_action_argv(self):
+        path = ROOT / "scripts" / "run_action.py"
+        spec = importlib.util.spec_from_file_location("run_action", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertEqual(
+            mod.build_argv({"KFLOW_COMMAND": "status"}),
+            ["status", "--record"],
+        )
+        self.assertEqual(
+            mod.build_argv({"KFLOW_COMMAND": "auto", "KFLOW_TUNE": "tune.toml"}),
+            ["auto", "--tune", "tune.toml"],
+        )
+        self.assertNotIn("--submit", mod.build_argv({"KFLOW_COMMAND": "auto"}))
+        self.assertEqual(
+            mod.build_argv({
+                "KFLOW_COMMAND": "gate",
+                "KFLOW_FILE": "main.py",
+                "KFLOW_OPPONENTS": "starter",
+                "KFLOW_SEEDS": "1-8",
+                "KFLOW_BASELINE": "old.py",
+            }),
+            ["gate", "main.py", "--opponents", "starter", "--seeds", "1-8",
+             "--baseline", "old.py"],
+        )
+        with self.assertRaises(SystemExit):
+            mod.build_argv({"KFLOW_COMMAND": "submit"})
 
 
 if __name__ == "__main__":

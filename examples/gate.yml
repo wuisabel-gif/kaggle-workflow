@@ -1,0 +1,20 @@
+# Fail a pull request when the agent does not load or loses locally.
+# Copy to .github/workflows/gate.yml in the competition repo.
+# No Kaggle token required.
+name: gate
+
+on:
+  pull_request:
+
+jobs:
+  local:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: wuisabel-gif/kaggle-workflow@v1
+        with:
+          command: gate
+          file: main.py
+          opponents: starter
+          baseline: main.py
+          seeds: 1-8

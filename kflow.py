@@ -17,6 +17,7 @@ import csv
 import datetime as dt
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import time
@@ -66,6 +67,43 @@ def append_csv(path: Path, rows: list[dict], fields: list[str]) -> None:
         if new:
             writer.writeheader()
         writer.writerows(rows)
+
+
+def _scalar(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value).replace("\r", " ").replace("\n", " ")
+
+
+def write_github_output(payload: dict) -> None:
+    path = os.environ.get("GITHUB_OUTPUT")
+    if not path:
+        return
+    with open(path, "a") as handle:
+        for key, value in payload.items():
+            if isinstance(value, (dict, list)):
+                continue
+            handle.write(f"{key}={_scalar(value)}\n")
+
+
+def write_github_summary(markdown: str) -> None:
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path or not markdown:
+        return
+    with open(path, "a") as handle:
+        handle.write(markdown if markdown.endswith("\n") else markdown + "\n")
+
+
+def publish_result(config: dict, payload: dict, summary: str = "") -> dict:
+    """Write last.json; on GitHub Actions also set outputs and the job summary."""
+    path = config["data_dir"] / "last.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=1, sort_keys=True) + "\n")
+    write_github_output(payload)
+    write_github_summary(summary)
+    return payload
 
 
 def sha256(path: Path) -> str:
@@ -134,8 +172,8 @@ def cmd_status(args, config):
             f"{str(s.get('description') or '')[:70]}"
         )
     scored = [s for s in subs if score(s.get("publicScore")) is not None]
-    if scored:
-        best = max(scored, key=lambda s: score(s["publicScore"]))
+    best = max(scored, key=lambda s: score(s["publicScore"])) if scored else None
+    if best:
         print(f"\n{len(subs)} submissions; highest score ever recorded: "
               f"{best['ref']} at {best['publicScore']} (old submissions may no longer play)")
     if args.record:
@@ -148,6 +186,16 @@ def cmd_status(args, config):
         path = config["data_dir"] / "ratings.csv"
         append_csv(path, rows, ["snapshot_utc", "ref", "status", "score"])
         print(f"recorded {len(rows)} rows to {path}")
+    payload = {
+        "command": "status",
+        "submission_count": len(subs),
+        "best_ref": best["ref"] if best else "",
+        "best_score": best["publicScore"] if best else "",
+    }
+    summary = [f"## kflow status", "", f"{payload['submission_count']} submissions"]
+    if best:
+        summary.append(f"best: `{payload['best_ref']}` at {payload['best_score']}")
+    publish_result(config, payload, "\n".join(summary) + "\n")
 
 
 def read_leaderboard(api, config) -> list[dict]:
@@ -168,12 +216,25 @@ def cmd_leaderboard(args, config):
     for row in rows[: args.top]:
         print(f"{row.get('Rank', ''):>5}  {row.get('Score', ''):>8}  {row.get('TeamName', '')}")
     ours = [r for r in rows if team and r.get("TeamName", "").lower() == team]
+    payload = {
+        "command": "leaderboard",
+        "teams": len(rows),
+        "rank": "",
+        "score": "",
+        "team": config["team"],
+    }
+    summary = [f"## kflow leaderboard", "", f"{len(rows)} teams"]
     for row in ours:
         rank = int(row.get("Rank") or 0)
+        payload["rank"] = rank
+        payload["score"] = row.get("Score") or ""
         print(f"\nus: rank {rank} of {len(rows)} (top {100 * rank / len(rows):.0f}%), "
               f"score {row.get('Score')}")
+        summary.append(f"rank **{rank}** of {len(rows)}, score {row.get('Score')}")
     if team and not ours:
         print(f"\nteam {config['team']!r} not found on the leaderboard")
+        summary.append(f"team {config['team']!r} not found")
+    publish_result(config, payload, "\n".join(summary) + "\n")
 
 
 def download(api, replay_dir: Path, episode_id: int) -> bool:
@@ -254,6 +315,11 @@ def cmd_preflight(args, config):
     for problem in problems:
         print(f"FAIL {problem}")
     print("PREFLIGHT " + ("FAILED" if problems else "PASSED"))
+    publish_result(config, {
+        "command": "preflight",
+        "passed": not problems,
+        "problems": "; ".join(problems),
+    }, f"## kflow preflight\n\n{'PASSED' if not problems else 'FAILED'}\n")
     sys.exit(1 if problems else 0)
 
 
@@ -310,16 +376,28 @@ def cmd_gate(args, config):
         print(line)
     rewards = [g["reward"] or 0 for g in games]
     wins = sum((g["reward"] or 0) > (g["opp_reward"] or 0) for g in games)
+    mean_reward = sum(rewards) / len(rewards)
     print(f"\n{len(games)} games  W-L {wins}-{len(games) - wins}  "
-          f"mean reward {sum(rewards) / len(rewards):.1f}")
+          f"mean reward {mean_reward:.1f}")
+    baseline_delta = ""
     if base:
         # Same seeds and seats, so the per-game difference removes town/seed luck.
         deltas = [(g["reward"] or 0) - (b["reward"] or 0) for g, b in zip(games, base)]
         better = sum(d > 0 for d in deltas)
         worse = sum(d < 0 for d in deltas)
-        print(f"vs baseline: mean delta {sum(deltas) / len(deltas):+.1f}, "
+        baseline_delta = sum(deltas) / len(deltas)
+        print(f"vs baseline: mean delta {baseline_delta:+.1f}, "
               f"better {better}, worse {worse}, same {len(deltas) - better - worse}")
-    if any(g["status"] in BAD_STATUSES for g in games):
+    bad = any(g["status"] in BAD_STATUSES for g in games)
+    publish_result(config, {
+        "command": "gate",
+        "games": len(games),
+        "wins": wins,
+        "mean_reward": round(mean_reward, 4),
+        "baseline_delta": baseline_delta if baseline_delta == "" else round(baseline_delta, 4),
+        "passed": not bad,
+    }, f"## kflow gate\n\n{len(games)} games, mean reward {mean_reward:.1f}\n")
+    if bad:
         sys.exit("an agent ended with a bad status")
 
 
@@ -350,7 +428,13 @@ def submit_file(file: Path, message: str, config: dict, steps: int, upload: bool
 
 
 def cmd_submit(args, config):
-    submit_file(Path(args.file), args.message, config, args.steps, upload=args.yes)
+    record = submit_file(Path(args.file), args.message, config, args.steps, upload=args.yes)
+    publish_result(config, {
+        "command": "submit",
+        "ref": record.get("ref") or "",
+        "file": record.get("file"),
+        "uploaded": bool(args.yes and record.get("ref")),
+    })
     if not args.yes:
         sys.exit("Re-run with --yes to submit.")
 
@@ -508,7 +592,13 @@ def tune(spec: dict, config: dict) -> dict:
 
 
 def cmd_tune(args, config):
-    tune(load_tune_spec(Path(args.spec), config), config)
+    result = tune(load_tune_spec(Path(args.spec), config), config)
+    publish_result(config, {
+        "command": "tune",
+        "passed": result["passed"],
+        "train_delta": result["train_delta"],
+        "best_file": result["best_file"],
+    }, f"## kflow tune\n\n{'passed' if result['passed'] else 'not better'}: {result['params']}\n")
 
 
 def cmd_auto(args, config):
@@ -527,12 +617,23 @@ def cmd_auto(args, config):
         for s in subs[:5]]
     rows = read_leaderboard(api, config)
     ours = [r for r in rows if r.get("TeamName", "").lower() == config["team"].lower()]
+    payload = {
+        "command": "auto",
+        "submission_count": len(subs),
+        "teams": len(rows),
+        "rank": "",
+        "score": "",
+        "passed": "",
+    }
     if ours:
+        payload["rank"] = ours[0].get("Rank") or ""
+        payload["score"] = ours[0].get("Score") or ""
         report += ["", f"Rank {ours[0]['Rank']} of {len(rows)}, score {ours[0]['Score']}."]
     if args.tune:
         spec = load_tune_spec(Path(args.tune), config)
         result = tune(spec, config)
         v = result["validation"]
+        payload["passed"] = result["passed"]
         report += ["", "## Tuning", "",
                    f"- Settings: {result['params']} (started from {result['start']})",
                    f"- Held-out games vs baseline: mean {v['delta']:+.1f} on a baseline mean "
@@ -549,6 +650,7 @@ def cmd_auto(args, config):
     path.write_text("\n".join(report) + "\n")
     print("\n".join(report))
     print(f"\nreport: {path}")
+    publish_result(config, payload, "\n".join(report) + "\n")
 
 
 def main(argv=None):

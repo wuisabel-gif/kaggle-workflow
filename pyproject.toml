@@ -1,9 +1,28 @@
 [project]
 name = "kflow"
-version = "0.1.0"
+version = "0.2.0"
 description = "Submit, track and study agents in Kaggle simulation competitions"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Isabel Wu" }]
 requires-python = ">=3.11"
-dependencies = ["kaggle>=2.0", "kaggle-environments"]
+keywords = ["kaggle", "simulation", "agents", "github-actions"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = ["kaggle>=2.0"]
+
+[project.optional-dependencies]
+sim = ["kaggle-environments"]
+
+[project.urls]
+Homepage = "https://github.com/wuisabel-gif/kaggle-workflow"
+Issues = "https://github.com/wuisabel-gif/kaggle-workflow/issues"
+Changelog = "https://github.com/wuisabel-gif/kaggle-workflow/blob/main/CHANGELOG.md"
 
 [project.scripts]
 kflow = "kflow:main"

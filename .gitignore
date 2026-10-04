@@ -1,6 +1,10 @@
 __pycache__/
 *.egg-info/
 build/
+dist/
 .kflow/replays/
 .kflow/leaderboard/
+.kflow/last.json
+.kflow/auto/
+.kflow/tune/
 .env

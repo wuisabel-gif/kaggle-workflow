@@ -1,0 +1,138 @@
+name: kaggle-kflow
+author: Isabel Wu
+description: Track Kaggle simulation submissions, publish rank, and gate agents before upload.
+branding:
+  icon: trending-up
+  color: blue
+
+inputs:
+  command:
+    description: status, leaderboard, auto, preflight, or gate. auto records scores and rank. Never submits.
+    required: false
+    default: auto
+  record:
+    description: For status, append scores to .kflow/ratings.csv
+    required: false
+    default: "true"
+  commit:
+    description: Commit .kflow/ratings.csv if it changed (needs contents: write)
+    required: false
+    default: "false"
+  kaggle-api-token:
+    description: Kaggle API token (status, leaderboard, auto)
+    required: false
+    default: ""
+  file:
+    description: Agent file for preflight or gate
+    required: false
+    default: ""
+  opponents:
+    description: Comma-separated opponents for gate (files or built-in names)
+    required: false
+    default: ""
+  seeds:
+    description: Gate seeds, as 1-8 or 1,7,42
+    required: false
+    default: "1-8"
+  baseline:
+    description: Gate baseline agent compared on the same seeds and seats
+    required: false
+    default: ""
+  top:
+    description: How many leaderboard rows to print
+    required: false
+    default: "20"
+  steps:
+    description: Episode length override for preflight or gate
+    required: false
+    default: ""
+  tune:
+    description: Path to tune.toml for auto (still never uploads)
+    required: false
+    default: ""
+  python-version:
+    description: Python used to install and run kflow
+    required: false
+    default: "3.12"
+
+outputs:
+  rank:
+    description: Leaderboard rank of the team in kflow.toml
+    value: ${{ steps.run.outputs.rank }}
+  score:
+    description: Leaderboard score of that team
+    value: ${{ steps.run.outputs.score }}
+  teams:
+    description: Number of teams on the leaderboard
+    value: ${{ steps.run.outputs.teams }}
+  submission_count:
+    description: Number of our submissions
+    value: ${{ steps.run.outputs.submission_count }}
+  best_ref:
+    description: Submission ref with the highest recorded public score
+    value: ${{ steps.run.outputs.best_ref }}
+  best_score:
+    description: Highest recorded public score
+    value: ${{ steps.run.outputs.best_score }}
+  passed:
+    description: true/false for preflight, gate, or auto tuning validation
+    value: ${{ steps.run.outputs.passed }}
+  mean_reward:
+    description: Mean local reward from gate
+    value: ${{ steps.run.outputs.mean_reward }}
+  baseline_delta:
+    description: Mean reward difference vs baseline from gate
+    value: ${{ steps.run.outputs.baseline_delta }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install kflow
+      shell: bash
+      run: |
+        extra=""
+        case "${{ inputs.command }}" in
+          preflight|gate) extra="[sim]" ;;
+          auto)
+            if [ -n "${{ inputs.tune }}" ]; then extra="[sim]"; fi
+            ;;
+        esac
+        python -m pip install --upgrade pip
+        python -m pip install "${{ github.action_path }}${extra}"
+
+    - name: Run kflow
+      id: run
+      shell: bash
+      env:
+        KAGGLE_API_TOKEN: ${{ inputs.kaggle-api-token }}
+        KFLOW_COMMAND: ${{ inputs.command }}
+        KFLOW_RECORD: ${{ inputs.record }}
+        KFLOW_FILE: ${{ inputs.file }}
+        KFLOW_OPPONENTS: ${{ inputs.opponents }}
+        KFLOW_SEEDS: ${{ inputs.seeds }}
+        KFLOW_BASELINE: ${{ inputs.baseline }}
+        KFLOW_TOP: ${{ inputs.top }}
+        KFLOW_STEPS: ${{ inputs.steps }}
+        KFLOW_TUNE: ${{ inputs.tune }}
+      run: python "${{ github.action_path }}/scripts/run_action.py"
+
+    - name: Commit ratings
+      if: ${{ inputs.commit == 'true' }}
+      shell: bash
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        if [ -f .kflow/ratings.csv ]; then
+          git add .kflow/ratings.csv
+        fi
+        if git diff --cached --quiet; then
+          echo "no ratings.csv changes to commit"
+        else
+          git commit -m "Record submission scores $(date -u +%F)"
+          git push
+        fi
