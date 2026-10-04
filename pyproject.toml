@@ -1,6 +1,6 @@
 [project]
 name = "kflow"
-version = "0.2.0"
+version = "0.2.1"
 description = "Submit, track and study agents in Kaggle simulation competitions"
 readme = "README.md"
 license = { file = "LICENSE" }

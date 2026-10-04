@@ -1,6 +1,11 @@
 # Changelog
 
-## 0.2.0 — 2025-10-03
+## 0.2.1 — 2026-10-04
+
+- First GitHub Marketplace listing of the `kaggle-kflow` Action.
+- README: removed release instructions.
+
+## 0.2.0 — 2026-10-03
 
 - GitHub Action `kaggle-kflow` at the repository root for Marketplace listing.
 - Commands write `.kflow/last.json` and, on GitHub Actions, job outputs plus a step summary.
